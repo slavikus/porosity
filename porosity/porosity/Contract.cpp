@@ -37,7 +37,7 @@ Contract::printInstructions(
 
     if (m_byteCodeRuntime.empty()) return "";
 
-    printf("- Total byte code size: 0x%x (%d)\n\n", m_byteCodeRuntime.size(), m_byteCodeRuntime.size());
+    printf("- Total byte code size: 0x%lx (%lu)\n\n", m_byteCodeRuntime.size(), m_byteCodeRuntime.size());
 
     dev::eth::eachInstruction(m_byteCodeRuntime, [&](uint32_t _offset, Instruction _instr, u256 const& _data) {
         printBranchName(_offset);
@@ -55,6 +55,8 @@ Contract::addBasicBlock(
     BasicBlockInfo newEntry = { 0 };
     newEntry.offset = _offset;
     newEntry.size = _size;
+	newEntry.nextDefault = NULL;
+	newEntry.nextJUMPI = NULL;
 
     auto newBlock = m_listbasicBlockInfo.insert(m_listbasicBlockInfo.begin(), pair<uint32_t, BasicBlockInfo>(_offset, newEntry));
 
@@ -380,10 +382,8 @@ Contract::walkAndConnectNodes(
     while (true) {
         auto block = m_listbasicBlockInfo.find(next); // getBlockAt()
         if (block == m_listbasicBlockInfo.end()) break;
-
-        if (block->second.walkedNode) break;
-
         next = block->second.dstDefault;
+		if (block->second.walkedNode) continue;
 
         // printf("hash = 0x%x, block = 0x%x, default = 0x%x, JUMPI = 0x%x\n", _hash, _block, block->second.dstDefault, block->second.dstJUMPI);
         if (block->second.dstJUMPI) {
@@ -398,10 +398,8 @@ Contract::walkAndConnectNodes(
                 block->second.dstDefault = exitNode->second;
             }
 
-            if (!block->second.nextDefault) {
-                block->second.nextDefault = getBlockAt(block->second.dstDefault);
-            }
-            break; // next
+            block->second.nextDefault = getBlockAt(block->second.dstDefault);
+		    break; // next
         }
     }
 }
@@ -562,7 +560,7 @@ Contract::printBlockReferences(
     // DEBUG
     for (auto it = m_listbasicBlockInfo.begin(); it != m_listbasicBlockInfo.end(); ++it) {
         auto refs = it->second.references;
-        printf("(dest = 0x%08X, numrefs = 0x%08X, refs = {", it->first, refs.size());
+        printf("(dest = 0x%08X, numrefs = 0x%08lX, refs = {", it->first, refs.size());
         for (auto ref = refs.begin(); ref != refs.end(); ++ref) {
             printf("0x%08x", ref->second.offset);
         }
@@ -620,6 +618,7 @@ Contract::getGraphviz(
         string dstDefault_str = porosity::to_hstring(dstDefault);
         uint32_t symbolHash = it->second.fnAddrHash;
         string symbolName = symbolHash ? getFunctionName(symbolHash) : "loc_" + porosity::to_hstring(source);
+        string optLabelName = symbolHash ? ",label=\""+symbolName+"\"" : "";
         string defaultColor = dstIfTrue ? "red" : "black";
         uint32_t basicBlockSize = it->second.size;
 
@@ -636,7 +635,8 @@ Contract::getGraphviz(
             graph += "    \"" + source_str + "\"" + " -> " + "\"" + dstDefault_str + "\"" + " [color=\""+ defaultColor +"\"];\n";
         }
         if (dstIfTrue) {
-            graph += "    \"" + source_str + "\"" + " -> " + "\"" + ifTrue_str + "\"" + " [color=\"green\"];\n";
+            graph += "    \"" + source_str + "\"" + " -> " + "\"" + ifTrue_str + "\"" +
+                     " [color=\"green\"" + optLabelName + "];\n";
         }
 #if 0
         auto refs = it->second.references;
@@ -838,7 +838,7 @@ Contract::printFunctions(
             auto func = m_publicFunctions.find(it->second.fnAddrHash);
             string name = "";
             if (func != m_publicFunctions.end()) name = func->second.name;
-            printf("[+] Hash: 0x%08X (%s) (%d references)\n", it->second.fnAddrHash, name.c_str(), it->second.references.size());
+            printf("[+] Hash: 0x%08X (%s) (%lu references)\n", it->second.fnAddrHash, name.c_str(), it->second.references.size());
             // getFunction(it->second.fnAddrHash);
         }
     }
@@ -992,28 +992,40 @@ Contract::decompileBlock(
             break;
         case Instruction::SSTORE:
         {
+            
+            if (i->stack.size()) {
 
-            string valueName = "";
-            switch (i->stack[1].type) {
-                case ConstantComputed:
-                case Constant:
-                {
-                    stringstream mod;
-                    mod << "0x" << std::hex << i->stack[1].value;
-                    valueName = mod.str();
-                    // mod << "0x" << std::hex << second->value;
-                    break;
+                string valueName = "";
+                switch (i->stack[1].type) {
+                    case ConstantComputed:
+                    case Constant:
+                    {
+                        stringstream mod;
+                        mod << "0x" << std::hex << i->stack[1].value;
+                        valueName = mod.str();
+                        // mod << "0x" << std::hex << second->value;
+                        break;
+                    }
+                    default:
+                        valueName = (i->stack[1].exp.size()) ? i->stack[1].exp : i->stack[1].name;
+                        break;
                 }
-                default:
-                    valueName = (i->stack[1].exp.size()) ? i->stack[1].exp : i->stack[1].name;
-                    break;
+                exp = "store[" + i->stack[0].name + "] = " + valueName + ";";
+            } else {
+                exp = "store[?];";
             }
-            exp = "store[" + i->stack[0].name + "] = " + valueName + ";";
+            
             if (_block->Flags & BlockFlags::NoMoreSSTORE) errCode |= DCode_Err_ReentrantVulnerablity;
             break;
+
         }
         case Instruction::RETURN:
-            exp = "return " + i->stack[0].name + ";";
+            if (i->stack.size()) {
+                exp = "return " + i->stack[0].name + ";";
+            } else {
+                exp = "return;";
+            }
+                
             result = false;
             break;
         case Instruction::STOP:
